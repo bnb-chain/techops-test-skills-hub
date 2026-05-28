@@ -1,0 +1,10 @@
+# Dependencies
+node_modules/
+
+# CI working directories (artifacts are produced fresh each run)
+parsed/
+enriched/
+
+# Logs and OS cruft
+*.log
+.DS_Store

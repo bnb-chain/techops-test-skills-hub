@@ -1,0 +1,23 @@
+{
+  "name": "skills-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Skills Hub registry CI: enrichment and security scanning of submitted skills.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:watch": "node --test --watch",
+    "parse": "node scripts/parse-submission.js",
+    "enrich": "node scripts/enrich-skill.js",
+    "merge-gate": "node scripts/check-merge-gate.js"
+  },
+  "dependencies": {
+    "ajv": "^8.17.1"
+  },
+  "devDependencies": {
+    "js-yaml": "^4.1.0"
+  }
+}

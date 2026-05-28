@@ -1,239 +1,200 @@
 #!/usr/bin/env node
+'use strict';
+
 /**
- * enrich-skill.js
+ * Job B — enrich (privileged; runs ONLY from main-branch code, with secrets).
  *
- * Reads a <skillname>-metadata.json file submitted by a contributor,
- * enriches it in-place with live data from GitHub and AgentGuard APIs.
+ * Consumes the data-only artifact produced by Job A (parse-pr) -- never the
+ * PR's copy of this script -- and enriches it with live GitHub metadata plus
+ * TWO independent security scans (AgentGuard + HashDit). Treating the PR JSON
+ * as data, not code, is the core fix for finding C1.
+ *
+ * Hardening applied here:
+ *   - GitHub URL parsed with the WHATWG URL parser (M5, via parse-url).
+ *   - All network calls go through fetchWithRetry: timeouts + backoff (M1, M6).
+ *   - Scanner candidate set broadened beyond .md with byte caps (H2, M1).
+ *   - Both scanner responses are schema-validated and FAIL CLOSED (M4): any
+ *     error yields verdict `failed`, never `null`.
  *
  * Usage:
- *   node scripts/enrich-skill.js skills/my-skill-metadata.json
+ *   node scripts/enrich-skill.js parsed/my-skill.json [parsed/other.json ...]
  *
- * Environment variables:
- *   GITHUB_TOKEN         - GitHub personal access token (recommended to avoid rate limits)
- *   AGENTGUARD_API_KEY   - AgentGuard API key (required for security scan)
+ * Env:
+ *   GITHUB_TOKEN, AGENTGUARD_API_KEY, HASHDIT_API_KEY
+ *   ENRICHED_DIR  - output directory (default: "enriched")
  */
 
 const fs = require('fs');
 const path = require('path');
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+const { createLogger } = require('./lib/logger');
+const { fetchWithRetry } = require('./lib/http');
+const { parseGithubUrl } = require('./lib/parse-url');
+const { selectCandidatePaths, buildScanContent } = require('./lib/content');
+const agentguard = require('./lib/agentguard');
+const hashdit = require('./lib/hashdit');
 
-function parseSubmission(filePath) {
-  let data;
-  try {
-    data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch (err) {
-    throw new Error(`Invalid JSON in ${filePath}: ${err.message}`);
-  }
-
-  const { name, github_url, category, description } = data;
-
-  if (!github_url)  throw new Error('Missing required field: github_url');
-  if (!category)    throw new Error('Missing required field: category');
-  if (!description) throw new Error('Missing required field: description');
-  if (!Array.isArray(category) || category.length === 0) {
-    throw new Error('Field "category" must be a non-empty array of strings');
-  }
-
-  return { name, githubUrl: github_url, category, description };
-}
-
-function githubHeaders() {
+function githubHeaders(token) {
   return {
     Accept: 'application/vnd.github.v3+json',
     'User-Agent': 'skills-hub-enricher',
-    ...(process.env.GITHUB_TOKEN
-      ? { Authorization: `Bearer ${process.env.GITHUB_TOKEN}` }
-      : {}),
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
   };
 }
 
-async function githubGet(url) {
-  const res = await fetch(url, { headers: githubHeaders() });
+async function githubGet(url, { fetchImpl, token, httpOptions }) {
+  const res = await fetchWithRetry(url, {
+    fetchImpl,
+    ...httpOptions,
+    init: { headers: githubHeaders(token) },
+  });
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`GitHub API error ${res.status} for ${url}: ${body}`);
+    throw new Error(`GitHub API error ${res.status} for ${url}`);
   }
   return res.json();
 }
 
-function parseOwnerRepo(githubUrl) {
-  const m = githubUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:\/.*)?$/);
-  if (!m) throw new Error(`Cannot parse owner/repo from URL: ${githubUrl}`);
-  return { owner: m[1], repo: m[2] };
+/**
+ * Fetches scannable repo files (best effort). A failure to list or fetch files
+ * is NOT fatal -- it simply yields no content, which makes the scanners fail
+ * closed downstream rather than silently passing.
+ */
+async function fetchRepoFiles(owner, repo, branch, { fetchImpl, token, httpOptions, logger }) {
+  let tree;
+  try {
+    tree = await githubGet(
+      `https://api.github.com/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`,
+      { fetchImpl, token, httpOptions },
+    );
+  } catch (err) {
+    logger.warn?.(`Could not list repo tree: ${err.message}`);
+    return [];
+  }
+
+  const paths = selectCandidatePaths(tree.tree || []);
+  const files = [];
+  for (const p of paths) {
+    try {
+      const raw = await fetchWithRetry(
+        `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${p}`,
+        { fetchImpl, ...httpOptions, init: { headers: { 'User-Agent': 'skills-hub-enricher' } } },
+      );
+      if (raw.ok) files.push({ path: p, text: await raw.text() });
+    } catch (err) {
+      logger.warn?.(`Could not fetch ${p}: ${err.message}`);
+    }
+  }
+  return files;
 }
 
 /**
- * Fetches the text content of skill-relevant files from a GitHub repo.
- * Returns a concatenated string to pass to AgentGuard as `content`.
+ * Enriches one parsed submission. Pure with respect to the injected fetchImpl,
+ * logger and clock, so it is fully testable without network access.
+ *
+ * @param {object} args
+ * @param {object} args.parsed data-only artifact from Job A
+ * @returns {Promise<object>} enriched metadata
  */
-async function fetchRepoContent(owner, repo, defaultBranch) {
-  const treeRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/git/trees/${defaultBranch}?recursive=1`,
-    { headers: githubHeaders() }
-  );
+async function enrichSkill({
+  parsed,
+  githubToken,
+  agentguardKey,
+  hashditKey,
+  fetchImpl = globalThis.fetch,
+  logger = console,
+  httpOptions = {},
+  now = () => new Date().toISOString(),
+}) {
+  const { owner, repo, canonical } = parseGithubUrl(parsed.github_url);
 
-  if (!treeRes.ok) return null;
-  const tree = await treeRes.json();
+  logger.info?.(`Checking repo accessibility: ${canonical}`);
+  const repoData = await githubGet(`https://api.github.com/repos/${owner}/${repo}`, { fetchImpl, token: githubToken, httpOptions });
 
-  const candidates = (tree.tree ?? [])
-    .filter((f) => f.type === 'blob' && f.path.endsWith('.md'))
-    .sort((a, b) => {
-      const score = (p) => (p.match(/^[^/]+\.md$/i) ? 0 : 1);
-      return score(a.path) - score(b.path);
-    })
-    .slice(0, 5);
+  logger.info?.(`Fetching owner profile: ${owner}`);
+  const ownerData = await githubGet(`https://api.github.com/users/${owner}`, { fetchImpl, token: githubToken, httpOptions });
 
-  if (!candidates.length) return null;
-
-  const contents = await Promise.all(
-    candidates.map(async (f) => {
-      const raw = await fetch(
-        `https://raw.githubusercontent.com/${owner}/${repo}/${defaultBranch}/${f.path}`
-      );
-      return raw.ok ? `### ${f.path}\n${await raw.text()}` : null;
-    })
-  );
-
-  return contents.filter(Boolean).join('\n\n');
-}
-
-// ---------------------------------------------------------------------------
-// Main enrichment
-// ---------------------------------------------------------------------------
-
-async function enrich(submissionFilePath) {
-  const absPath = path.resolve(submissionFilePath);
-  const skillId = path.basename(absPath, '-metadata.json');
-
-  console.log(`\n→ Enriching: ${skillId}`);
-
-  // 1. Parse contributor-submitted JSON
-  const { name, githubUrl, category, description } = parseSubmission(absPath);
-
-  const { owner, repo } = parseOwnerRepo(githubUrl);
-
-  // 2. Check URL accessibility + fetch repo metadata
-  console.log(`  Checking repo accessibility: ${githubUrl}`);
-  const repoData = await githubGet(`https://api.github.com/repos/${owner}/${repo}`);
-
-  // 3. Fetch owner profile (user or org)
-  console.log(`  Fetching owner profile: ${owner}`);
-  const ownerData = await githubGet(`https://api.github.com/users/${owner}`);
-
-  // 4. Fetch latest commit hash
-  console.log(`  Fetching latest commit hash`);
+  logger.info?.('Fetching latest commit');
   const commits = await githubGet(
-    `https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`
+    `https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`,
+    { fetchImpl, token: githubToken, httpOptions },
   );
-  const latestCommit = commits[0]?.sha ?? null;
+  const latestCommit = Array.isArray(commits) && commits[0] ? commits[0].sha ?? null : null;
 
-  // 5. AgentGuard security scan
-  //    Endpoint: POST https://agentguard.gopluslabs.io/api/v1/scan
-  //    Auth:     X-API-Key header  (secret: AGENTGUARD_API_KEY)
-  //    Body:     { content: "<repo file text>" }
-  //    Response: { report_url, scan_id, ... }
-  let agentguardReportUrl = null;
-  let agentguardScanId    = null;
-  let agentguardResult    = null;
+  logger.info?.('Gathering repo content for scanners');
+  const files = await fetchRepoFiles(owner, repo, repoData.default_branch, { fetchImpl, token: githubToken, httpOptions, logger });
+  const payload = buildScanContent(files);
 
-  if (process.env.AGENTGUARD_API_KEY) {
-    console.log(`  Fetching repo content for AgentGuard scan`);
-    const skillContent = await fetchRepoContent(owner, repo, repoData.default_branch);
+  logger.info?.('Running AgentGuard scan');
+  const ag = await agentguard.scan({ payload, apiKey: agentguardKey, fetchImpl, logger, httpOptions });
+  logger.info?.('Running HashDit scan');
+  const hd = await hashdit.scan({ payload, apiKey: hashditKey, fetchImpl, logger, httpOptions });
 
-    if (!skillContent) {
-      console.warn('  ⚠ No scannable content found in repo — skipping AgentGuard');
-    } else {
-      console.log(`  Calling AgentGuard API`);
-      try {
-        const agRes = await fetch('https://agentguard.gopluslabs.io/api/v1/scan', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-API-Key': process.env.AGENTGUARD_API_KEY,
-          },
-          body: JSON.stringify({ content: skillContent }),
-        });
-
-        if (agRes.ok) {
-          const agData = await agRes.json();
-          const scan   = agData.data ?? {};
-          agentguardReportUrl = scan.reportUrl ?? null;
-          agentguardScanId    = scan.scanId    ?? null;
-          agentguardResult    = {
-            risk_score: scan.riskScore  ?? null,
-            risk_level: scan.riskLevel  ?? null,
-            verdict:    scan.verdict    ?? null,
-            summary:    scan.summary    ?? null,
-            threats:    scan.threats    ?? [],
-          };
-          console.log(`  AgentGuard report: ${agentguardReportUrl ?? 'no reportUrl in response'}`);
-        } else {
-          const errBody = await agRes.text();
-          console.warn(`  ⚠ AgentGuard returned ${agRes.status}: ${errBody} — skipping`);
-        }
-      } catch (err) {
-        console.warn(`  ⚠ AgentGuard call failed: ${err.message} — skipping`);
-      }
-    }
-  } else {
-    console.warn('  ⚠ AGENTGUARD_API_KEY not set — skipping security scan');
-  }
-
-  // 6. Merge enriched fields into the original submission file
-  const enriched = {
-    name: name ?? skillId,
-    github_url: repoData.html_url,
-    category,
-    description,
+  return {
+    name: parsed.name || parsed.skill_id,
+    github_url: canonical,
+    category: parsed.category,
+    description: parsed.description,
     owner: {
-      username:     ownerData.login,
+      username: ownerData.login,
       display_name: ownerData.name ?? ownerData.login,
-      type:         ownerData.type,
-      profile_url:  `https://github.com/${ownerData.login}`,
-      avatar_url:   ownerData.avatar_url,
+      type: ownerData.type,
+      profile_url: `https://github.com/${ownerData.login}`,
+      avatar_url: ownerData.avatar_url ?? null,
     },
     repo: {
-      stars:          repoData.stargazers_count,
+      stars: repoData.stargazers_count ?? null,
       default_branch: repoData.default_branch,
     },
-    latest_commit:         latestCommit,
-    agentguard_scan_id:    agentguardScanId,
-    agentguard_report_url: agentguardReportUrl,
-    agentguard_result:     agentguardResult,
-    evaluated_at:          new Date().toISOString(),
+    latest_commit: latestCommit,
+    agentguard_scan_id: ag.scan_id,
+    agentguard_report_url: ag.report_url,
+    agentguard_result: ag.result,
+    hashdit_scan_id: hd.scan_id,
+    hashdit_report_url: hd.report_url,
+    hashdit_result: hd.result,
+    evaluated_at: now(),
   };
-
-  fs.writeFileSync(absPath, JSON.stringify(enriched, null, 2) + '\n');
-  console.log(`✓ Done: ${skillId}\n`);
-
-  return enriched;
 }
 
-// ---------------------------------------------------------------------------
-// CLI entry point
-// ---------------------------------------------------------------------------
-
-const args = process.argv.slice(2);
-
-if (args.length === 0) {
-  console.error('Usage: node scripts/enrich-skill.js <path-to-metadata.json> [...]');
-  process.exit(1);
-}
-
-(async () => {
-  let hasError = false;
-
-  for (const filePath of args) {
-    try {
-      await enrich(filePath);
-    } catch (err) {
-      console.error(`✗ Failed [${filePath}]: ${err.message}`);
-      hasError = true;
-    }
+async function run(argv, { logger, enrichedDir, env }) {
+  if (argv.length === 0) {
+    logger.error('Usage: node scripts/enrich-skill.js <parsed-artifact.json> [...]');
+    return 1;
   }
 
-  process.exit(hasError ? 1 : 0);
-})();
+  fs.mkdirSync(enrichedDir, { recursive: true });
+
+  let hadError = false;
+
+  for (const fileName of argv) {
+    logger.group(`Enriching ${fileName}`);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(fileName, 'utf8'));
+      const enriched = await enrichSkill({
+        parsed,
+        githubToken: env.GITHUB_TOKEN,
+        agentguardKey: env.AGENTGUARD_API_KEY,
+        hashditKey: env.HASHDIT_API_KEY,
+        logger,
+      });
+      const skillId = parsed.skill_id || path.basename(fileName, '.json');
+      const outPath = path.join(enrichedDir, `${skillId}.json`);
+      fs.writeFileSync(outPath, `${JSON.stringify(enriched, null, 2)}\n`);
+      logger.info(`Wrote ${outPath}`);
+    } catch (err) {
+      logger.error(`Failed to enrich ${fileName}: ${err.message}`);
+      hadError = true;
+    }
+    logger.groupEnd();
+  }
+
+  return hadError ? 1 : 0;
+}
+
+module.exports = { enrichSkill, githubGet, fetchRepoFiles, run };
+
+if (require.main === module) {
+  const logger = createLogger({ prefix: '[enrich]' });
+  const enrichedDir = process.env.ENRICHED_DIR || 'enriched';
+  run(process.argv.slice(2), { logger, enrichedDir, env: process.env }).then((code) => process.exit(code));
+}

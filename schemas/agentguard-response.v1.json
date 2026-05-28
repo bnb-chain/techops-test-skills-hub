@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://skills-hub.bnbchain.org/schemas/agentguard-response.v1.json",
+  "title": "AgentGuard scan response data (v1)",
+  "description": "Strict contract for the `data` envelope returned by the AgentGuard scan API. Unknown fields are dropped; a response that fails this schema is treated as a failed scan (fail closed).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict"],
+  "properties": {
+    "scanId": { "type": ["string", "null"] },
+    "reportUrl": { "type": ["string", "null"] },
+    "riskScore": { "type": ["number", "null"] },
+    "riskLevel": { "type": ["string", "null"] },
+    "verdict": {
+      "type": "string",
+      "enum": ["passed", "failed", "warning"]
+    },
+    "summary": { "type": ["string", "null"] },
+    "threats": {
+      "type": "array",
+      "items": { "type": "object" }
+    }
+  }
+}
