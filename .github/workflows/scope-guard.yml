@@ -1,0 +1,109 @@
+name: Scope Guard
+
+# Runs on every PR regardless of which files changed.
+# Fails if any file outside the allowed contributor paths is touched,
+# protecting the workflow, scripts, and templates from tampering.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  check-scope:
+    name: Check PR Scope
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # -----------------------------------------------------------------------
+      # Allowed paths for contributors:
+      #   skills/<skillname>-metadata.json   — skill submissions
+      #   README.md                          — top-level readme only
+      #
+      # Everything else is off-limits:
+      #   .github/         — workflow files
+      #   scripts/         — enrichment script
+      #   CONTRIBUTING.md  — contribution guide
+      #   skills/_TEMPLATE-metadata.json — template file
+      # -----------------------------------------------------------------------
+      - name: Check for out-of-scope changes
+        id: scope
+        run: |
+          ALL_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+
+          VIOLATIONS=""
+          while IFS= read -r file; do
+            # Allow: skills/<name>-metadata.json (but not the template)
+            if echo "$file" | grep -qE '^skills/[^/]+-metadata\.json$'; then
+              if [ "$file" = "skills/_TEMPLATE-metadata.json" ]; then
+                VIOLATIONS="${VIOLATIONS}${file}\n"
+              fi
+              continue
+            fi
+
+            # Allow: README.md
+            if [ "$file" = "README.md" ]; then
+              continue
+            fi
+
+            # Everything else is a violation
+            VIOLATIONS="${VIOLATIONS}${file}\n"
+          done <<< "$ALL_FILES"
+
+          if [ -n "$VIOLATIONS" ]; then
+            echo "violations=true" >> "$GITHUB_OUTPUT"
+            # Write to temp file — not interpolated into shell or JS
+            printf "%b" "$VIOLATIONS" > /tmp/violations.txt
+            echo "Out-of-scope files detected:"
+            cat /tmp/violations.txt
+          else
+            echo "violations=false" >> "$GITHUB_OUTPUT"
+            echo "All changed files are within allowed scope."
+          fi
+
+      - name: Comment violation details on PR
+        if: steps.scope.outputs.violations == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+
+            const files = fs.readFileSync('/tmp/violations.txt', 'utf8')
+              .trim().split('\n').filter(Boolean);
+
+            const rows = files.map(f => `| \`${f}\` |`).join('\n');
+
+            const body = [
+              '## Scope Guard: Out-of-Scope Changes Detected',
+              '',
+              'This PR modifies files that contributors are not permitted to change.',
+              '',
+              '| File |',
+              '|------|',
+              rows,
+              '',
+              '**Allowed paths:**',
+              '- `skills/<skillname>-metadata.json` — your skill submission',
+              '- `README.md`',
+              '',
+              'Please remove changes to any other files and push again.',
+            ].join('\n');
+
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+      - name: Fail if violations found
+        if: steps.scope.outputs.violations == 'true'
+        run: |
+          echo "PR contains changes outside of allowed paths. See comment for details."
+          exit 1
