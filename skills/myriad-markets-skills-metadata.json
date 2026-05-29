@@ -1,6 +1,92 @@
 {
   "name": "Myriad Markets Skills",
   "github_url": "https://github.com/MyriadProtocol/myriad-cli",
-  "category": ["Myriad Markets", "Prediction Markets"],
-  "description": "Use the Myriad CLI to trade prediction markets on Myriad Markets"
+  "category": [
+    "Myriad Markets",
+    "Prediction Markets"
+  ],
+  "description": "Use the Myriad CLI to trade prediction markets on Myriad Markets",
+  "owner": {
+    "username": "MyriadProtocol",
+    "display_name": "Myriad Protocol",
+    "type": "Organization",
+    "profile_url": "https://github.com/MyriadProtocol",
+    "avatar_url": "https://avatars.githubusercontent.com/u/267134826?v=4"
+  },
+  "repo": {
+    "stars": 5,
+    "default_branch": "main"
+  },
+  "latest_commit": "24cebc04f747a48779e2e3b66a93e84cfa502800",
+  "agentguard_scan_id": "36f59c84-a975-4e68-8a06-788938b75922",
+  "agentguard_report_url": "https://agentguard.gopluslabs.io/report/36f59c84-a975-4e68-8a06-788938b75922",
+  "agentguard_result": {
+    "risk_score": 60,
+    "risk_level": "medium",
+    "verdict": "failed",
+    "summary": "Issues found across 2 detection categories.",
+    "threats": [
+      {
+        "detector": "credential_leak",
+        "severity": "medium",
+        "title": "console-log-secret",
+        "description": "Logging secrets to console",
+        "evidence": "console.log('Token ID:', token",
+        "line": 1902,
+        "remediation": "This skill appears to exfiltrate credentials. Do not install or run this skill. Report it to the registry maintainer.",
+        "cwe": "CWE-200"
+      },
+      {
+        "detector": "prompt_injection",
+        "severity": "medium",
+        "title": "string-reverse-execution",
+        "description": "Reverses a string to hide malicious content",
+        "evidence": ".reverse().join(\" \")",
+        "line": 6424,
+        "remediation": "Prompt injection detected. This skill attempts to override or manipulate agent instructions. Do not install this skill.",
+        "cwe": "CWE-77"
+      },
+      {
+        "detector": "prompt_injection",
+        "severity": "medium",
+        "title": "reverse-string-execution",
+        "description": "Reverses a string, possibly to hide malicious content",
+        "evidence": ".reverse().join(\" \")",
+        "line": 6424,
+        "remediation": "Obfuscated content detected. This may be used to hide malicious instructions. Manually review the decoded content before trusting this skill.",
+        "cwe": "CWE-116"
+      },
+      {
+        "detector": "prompt_injection",
+        "severity": "low",
+        "title": "large-base64-string",
+        "description": "Large base64-encoded string that may contain hidden instructions (115 total occurrences, 112 suppressed)",
+        "evidence": "0x095ea7b300000000000000000000000039e66ee6b2ddaf4defded3038e0162180dbef3400000000000000000000000000000000000000000000000055de6a779bbac0000",
+        "line": 489,
+        "remediation": "Prompt injection detected. This skill attempts to override or manipulate agent instructions. Do not install this skill.",
+        "cwe": "CWE-77"
+      },
+      {
+        "detector": "prompt_injection",
+        "severity": "low",
+        "title": "large-base64-string",
+        "description": "Large base64-encoded string that may contain hidden instructions",
+        "evidence": "0xa9059cbb00000000000000000000000000000000000000000000000000000000000000020000000000000000000000000000000000000000000000000de0b6b3a7640000",
+        "line": 494,
+        "remediation": "Prompt injection detected. This skill attempts to override or manipulate agent instructions. Do not install this skill.",
+        "cwe": "CWE-77"
+      },
+      {
+        "detector": "prompt_injection",
+        "severity": "low",
+        "title": "large-base64-string",
+        "description": "Large base64-encoded string that may contain hidden instructions",
+        "evidence": "0x1281311d00000000000000000000000000000000000000000000000000000000000023270000000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000000000000000000005cf581ebb20f...",
+        "line": 499,
+        "remediation": "Prompt injection detected. This skill attempts to override or manipulate agent instructions. Do not install this skill.",
+        "cwe": "CWE-77"
+      }
+    ]
+  },
+  "evaluated_at": "2026-05-29T08:56:03.373Z"
 }
