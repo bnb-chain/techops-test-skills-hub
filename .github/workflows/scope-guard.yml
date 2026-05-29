@@ -13,7 +13,8 @@ jobs:
     name: Check PR Scope
     runs-on: ubuntu-latest
     permissions:
-      pull-requests: write
+      contents: read        # required for actions/checkout to read this (private) repo
+      pull-requests: write  # required to post the violation comment
 
     steps:
       - name: Checkout
