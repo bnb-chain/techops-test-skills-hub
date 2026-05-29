@@ -49,9 +49,8 @@ function rowFor(skill) {
   const commit = stripMarkdown((skill.latest_commit || 'n/a').slice(0, 7));
 
   const agentguard = scannerCell(skill.agentguard_result, skill.agentguard_report_url);
-  const hashdit = scannerCell(skill.hashdit_result, skill.hashdit_report_url);
 
-  return `| ${nameCell} | ${category} | ${ownerCell} | \`${commit}\` | ${agentguard} | ${hashdit} |`;
+  return `| ${nameCell} | ${category} | ${ownerCell} | \`${commit}\` | ${agentguard} |`;
 }
 
 /**
@@ -65,11 +64,11 @@ function renderComment(skills) {
   return [
     '## Skill Enrichment Preview',
     '',
-    'Each skill below was scanned by two independent scanners. Merge is blocked',
-    'unless BOTH return `passed`.',
+    'Each skill below was scanned by AgentGuard. Merge is blocked unless the',
+    'verdict is `passed`.',
     '',
-    '| Skill | Category | Owner | Commit | AgentGuard | HashDit |',
-    '|-------|----------|-------|--------|------------|---------|',
+    '| Skill | Category | Owner | Commit | AgentGuard |',
+    '|-------|----------|-------|--------|------------|',
     ...rows,
   ].join('\n');
 }

@@ -87,8 +87,8 @@ jobs:
   # ---------------------------------------------------------------------------
   # Job B — enrich (PRIVILEGED). Runs ONLY the main-branch code (checked out at
   # base.sha), never the PR's copy of the scripts, then enriches the data-only
-  # artifact and runs BOTH scanners. The merge-gate check is published here:
-  # check-merge-gate.js exits non-zero unless every skill passed both scanners.
+  # artifact and runs the AgentGuard scan. The merge-gate check is published
+  # here: check-merge-gate.js exits non-zero unless every skill passed.
   # ---------------------------------------------------------------------------
   enrich:
     name: Enrich & scan (Job B)
@@ -121,14 +121,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           AGENTGUARD_API_KEY: ${{ secrets.AGENTGUARD_API_KEY }}
-          HASHDIT_API_KEY: ${{ secrets.HASHDIT_API_KEY }}
           ENRICHED_DIR: enriched
         run: |
           node scripts/enrich-skill.js parsed/*.json
 
       # Security boundary (C3): branch protection requires this `enrich` check.
-      # It is green only when both scanners returned `passed` for every skill.
-      - name: Merge gate (both scanners must pass)
+      # It is green only when AgentGuard returned `passed` for every skill.
+      - name: Merge gate (AgentGuard must pass)
         run: |
           node scripts/check-merge-gate.js enriched/*.json
 

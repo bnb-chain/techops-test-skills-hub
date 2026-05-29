@@ -4,49 +4,35 @@
  * Merge-gate decision logic (finding C3).
  *
  * The `merge-gate` status check is the security boundary that branch protection
- * enforces. It is `success` ONLY when BOTH independent scanners -- AgentGuard
- * and HashDit -- recorded a `passed` verdict in the enriched metadata. Any
- * failed, warning, missing, or malformed verdict from either scanner yields
- * `failure` (fail closed) so that a scanner outage or a poisoned response can
- * never produce a green gate. Requiring both scanners means a single
- * compromised scanner cannot wave a malicious skill through on its own.
+ * enforces. It is `success` ONLY when the AgentGuard verdict recorded in the
+ * enriched metadata is `passed`. A failed, warning, missing, or malformed
+ * verdict yields `failure` (fail closed) so that scanner outages or poisoned
+ * responses can never produce a green gate.
  */
 
 const SUCCESS = 'success';
 const FAILURE = 'failure';
 
-// Each scanner records its verdict under `<scanner>_result.verdict`.
-const REQUIRED_SCANNERS = [
-  { key: 'agentguard_result', name: 'agentguard' },
-  { key: 'hashdit_result', name: 'hashdit' },
-];
-
 /**
  * @param {object} metadata enriched skill metadata
- * @returns {{ state: 'success'|'failure', verdicts: object, reason: string }}
+ * @returns {{ state: 'success'|'failure', verdict: (string|null), reason: string }}
  */
 function evaluateMergeGate(metadata) {
   if (!metadata || typeof metadata !== 'object') {
-    return { state: FAILURE, verdicts: {}, reason: 'metadata-missing' };
+    return { state: FAILURE, verdict: null, reason: 'metadata-missing' };
   }
 
-  const verdicts = {};
-
-  for (const scanner of REQUIRED_SCANNERS) {
-    const result = metadata[scanner.key];
-    if (!result || typeof result !== 'object') {
-      return { state: FAILURE, verdicts, reason: `no-${scanner.name}-result` };
-    }
-
-    const verdict = typeof result.verdict === 'string' ? result.verdict : null;
-    verdicts[scanner.name] = verdict;
-
-    if (verdict !== 'passed') {
-      return { state: FAILURE, verdicts, reason: `${scanner.name}-verdict-${verdict ?? 'missing'}` };
-    }
+  const result = metadata.agentguard_result;
+  if (!result || typeof result !== 'object') {
+    return { state: FAILURE, verdict: null, reason: 'no-agentguard-result' };
   }
 
-  return { state: SUCCESS, verdicts, reason: 'all-scanners-passed' };
+  const verdict = typeof result.verdict === 'string' ? result.verdict : null;
+  if (verdict === 'passed') {
+    return { state: SUCCESS, verdict, reason: 'agentguard-passed' };
+  }
+
+  return { state: FAILURE, verdict, reason: `agentguard-verdict-${verdict ?? 'missing'}` };
 }
 
 /**

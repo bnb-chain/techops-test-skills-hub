@@ -7,8 +7,8 @@ const { run } = require('../scripts/check-merge-gate');
 
 const silentLogger = { info() {}, warn() {}, error() {}, group() {}, groupEnd() {} };
 
-const pass = { agentguard_result: { verdict: 'passed' }, hashdit_result: { verdict: 'passed' } };
-const fail = { agentguard_result: { verdict: 'passed' }, hashdit_result: { verdict: 'failed' } };
+const pass = { agentguard_result: { verdict: 'passed' } };
+const fail = { agentguard_result: { verdict: 'failed' } };
 
 function readerFor(map) {
   return (p) => {
@@ -17,7 +17,7 @@ function readerFor(map) {
   };
 }
 
-test('exit code 0 when every skill passes both scanners', () => {
+test('exit code 0 when every skill passes the scan', () => {
   const code = run(['enriched/a.json', 'enriched/b.json'], {
     logger: silentLogger,
     readFile: readerFor({ 'enriched/a.json': pass, 'enriched/b.json': pass }),

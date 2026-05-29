@@ -22,9 +22,9 @@ function textResponse(status, body) {
   return { ok: status >= 200 && status < 300, status, text: async () => body };
 }
 
-// Routes GitHub + scanner calls by URL substring. `scanners` controls each
-// scanner verdict independently.
-function makeFetch({ agentguard = 'passed', hashdit = 'passed' } = {}) {
+// Routes GitHub + scanner calls by URL substring. `agentguard` controls the
+// scanner verdict.
+function makeFetch({ agentguard = 'passed' } = {}) {
   return async (url) => {
     if (url.includes('api.github.com/repos/octocat/Hello-World/commits')) {
       return jsonResponse(200, [{ sha: 'abc1234def' }]);
@@ -44,16 +44,13 @@ function makeFetch({ agentguard = 'passed', hashdit = 'passed' } = {}) {
     if (url.includes('agentguard.gopluslabs.io')) {
       return jsonResponse(200, { data: { verdict: agentguard, scanId: 'ag1', reportUrl: 'https://agentguard.gopluslabs.io/r/ag1' } });
     }
-    if (url.includes('hashdit.io')) {
-      return jsonResponse(200, { data: { verdict: hashdit, scanId: 'hd1', reportUrl: 'https://hashdit.io/r/hd1' } });
-    }
     throw new Error(`unexpected url: ${url}`);
   };
 }
 
-const keys = { githubToken: 'gh', agentguardKey: 'ag', hashditKey: 'hd' };
+const keys = { githubToken: 'gh', agentguardKey: 'ag' };
 
-test('enriches with both scanners passing', async () => {
+test('enriches with AgentGuard passing', async () => {
   const out = await enrichSkill({ parsed, ...keys, fetchImpl: makeFetch(), logger: silentLogger, now: () => '2026-01-01T00:00:00.000Z' });
   assert.equal(out.github_url, 'https://github.com/octocat/Hello-World');
   assert.equal(out.owner.username, 'octocat');
@@ -62,22 +59,14 @@ test('enriches with both scanners passing', async () => {
   assert.equal(out.repo.default_branch, 'main');
   assert.equal(out.latest_commit, 'abc1234def');
   assert.equal(out.agentguard_result.verdict, 'passed');
-  assert.equal(out.hashdit_result.verdict, 'passed');
   assert.equal(out.agentguard_scan_id, 'ag1');
-  assert.equal(out.hashdit_scan_id, 'hd1');
   assert.equal(out.evaluated_at, '2026-01-01T00:00:00.000Z');
+  assert.equal('hashdit_result' in out, false);
 });
 
 test('records a failed AgentGuard verdict (fail closed)', async () => {
   const out = await enrichSkill({ parsed, ...keys, fetchImpl: makeFetch({ agentguard: 'warning' }), logger: silentLogger });
   assert.equal(out.agentguard_result.verdict, 'failed');
-  assert.equal(out.hashdit_result.verdict, 'passed');
-});
-
-test('records a failed HashDit verdict (fail closed)', async () => {
-  const out = await enrichSkill({ parsed, ...keys, fetchImpl: makeFetch({ hashdit: 'failed' }), logger: silentLogger });
-  assert.equal(out.agentguard_result.verdict, 'passed');
-  assert.equal(out.hashdit_result.verdict, 'failed');
 });
 
 test('throws when the GitHub repo is not accessible', async () => {
@@ -91,7 +80,7 @@ test('throws when the GitHub repo is not accessible', async () => {
   );
 });
 
-test('fails both scanners closed when no scannable content is found', async () => {
+test('fails the scanner closed when no scannable content is found', async () => {
   const fetchImpl = async (url) => {
     if (url.includes('/commits')) return jsonResponse(200, [{ sha: 'abc' }]);
     if (url.includes('/git/trees/')) return jsonResponse(200, { tree: [{ type: 'blob', path: 'logo.png' }] });
@@ -101,5 +90,4 @@ test('fails both scanners closed when no scannable content is found', async () =
   };
   const out = await enrichSkill({ parsed, ...keys, fetchImpl, logger: silentLogger });
   assert.equal(out.agentguard_result.verdict, 'failed');
-  assert.equal(out.hashdit_result.verdict, 'failed');
 });

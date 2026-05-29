@@ -5,7 +5,7 @@
  * merge-gate status publisher (finding C3).
  *
  * Reads the enriched artifacts produced by Job B and exits 0 ONLY when every
- * skill passed both scanners (see lib/merge-gate). A non-zero exit fails the
+ * skill passed the AgentGuard scan (see lib/merge-gate). A non-zero exit fails the
  * job, which fails the `merge-gate` status check that branch protection
  * requires -- so a failed or missing scan can never be merged. This is the
  * security boundary; a PR label cannot substitute for a green check here.
@@ -51,7 +51,7 @@ function run(argv, { logger = console, readFile = (p) => fs.readFileSync(p, 'utf
   }
 
   if (batch.state === 'success') {
-    logger.info(`merge-gate: PASS — ${metadataList.length} skill(s) cleared both scanners.`);
+    logger.info(`merge-gate: PASS — ${metadataList.length} skill(s) cleared the scan.`);
     return 0;
   }
 

@@ -10,7 +10,7 @@
  * is on an allow-list.
  */
 
-const DEFAULT_ALLOWED_HOSTS = ['github.com', 'agentguard.gopluslabs.io', 'hashdit.io'];
+const DEFAULT_ALLOWED_HOSTS = ['github.com', 'agentguard.gopluslabs.io'];
 
 const MARKDOWN_METACHARS = /[[\]()|`*_~<>#!]/g;
 

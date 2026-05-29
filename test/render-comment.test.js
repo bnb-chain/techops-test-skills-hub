@@ -13,15 +13,12 @@ const baseSkill = {
   latest_commit: 'abc1234def5678',
   agentguard_result: { verdict: 'passed' },
   agentguard_report_url: 'https://agentguard.gopluslabs.io/r/ag1',
-  hashdit_result: { verdict: 'passed' },
-  hashdit_report_url: 'https://hashdit.io/r/hd1',
 };
 
-test('renders a comment with both scanner verdicts', () => {
+test('renders a comment with the AgentGuard verdict', () => {
   const body = renderComment([baseSkill]);
   assert.match(body, /My Skill/);
   assert.match(body, /AgentGuard/);
-  assert.match(body, /HashDit/);
   assert.match(body, /passed/);
   assert.match(body, /abc1234/);
 });
@@ -44,14 +41,14 @@ test('does not render a lookalike report URL as a link', () => {
   assert.equal(body.includes('https://evil.com/phish'), false);
 });
 
-test('shows a failed verdict plainly when a scanner blocks', () => {
-  const blocked = { ...baseSkill, hashdit_result: { verdict: 'failed' }, hashdit_report_url: null };
+test('shows a failed verdict plainly when the scanner blocks', () => {
+  const blocked = { ...baseSkill, agentguard_result: { verdict: 'failed' }, agentguard_report_url: null };
   const body = renderComment([blocked]);
   assert.match(body, /failed/);
 });
 
 test('handles a missing scanner result without throwing', () => {
-  const partial = { ...baseSkill, hashdit_result: null, hashdit_report_url: null };
+  const partial = { ...baseSkill, agentguard_result: null, agentguard_report_url: null };
   const body = renderComment([partial]);
   assert.ok(typeof body === 'string' && body.length > 0);
 });

@@ -6,21 +6,21 @@
  *
  * Consumes the data-only artifact produced by Job A (parse-pr) -- never the
  * PR's copy of this script -- and enriches it with live GitHub metadata plus
- * TWO independent security scans (AgentGuard + HashDit). Treating the PR JSON
- * as data, not code, is the core fix for finding C1.
+ * an AgentGuard security scan. Treating the PR JSON as data, not code, is the
+ * core fix for finding C1.
  *
  * Hardening applied here:
  *   - GitHub URL parsed with the WHATWG URL parser (M5, via parse-url).
  *   - All network calls go through fetchWithRetry: timeouts + backoff (M1, M6).
  *   - Scanner candidate set broadened beyond .md with byte caps (H2, M1).
- *   - Both scanner responses are schema-validated and FAIL CLOSED (M4): any
+ *   - The scanner response is schema-validated and FAILS CLOSED (M4): any
  *     error yields verdict `failed`, never `null`.
  *
  * Usage:
  *   node scripts/enrich-skill.js parsed/my-skill.json [parsed/other.json ...]
  *
  * Env:
- *   GITHUB_TOKEN, AGENTGUARD_API_KEY, HASHDIT_API_KEY
+ *   GITHUB_TOKEN, AGENTGUARD_API_KEY
  *   ENRICHED_DIR  - output directory (default: "enriched")
  */
 
@@ -32,7 +32,6 @@ const { fetchWithRetry } = require('./lib/http');
 const { parseGithubUrl } = require('./lib/parse-url');
 const { selectCandidatePaths, buildScanContent } = require('./lib/content');
 const agentguard = require('./lib/agentguard');
-const hashdit = require('./lib/hashdit');
 
 function githubHeaders(token) {
   return {
@@ -99,7 +98,6 @@ async function enrichSkill({
   parsed,
   githubToken,
   agentguardKey,
-  hashditKey,
   fetchImpl = globalThis.fetch,
   logger = console,
   httpOptions = {},
@@ -126,8 +124,6 @@ async function enrichSkill({
 
   logger.info?.('Running AgentGuard scan');
   const ag = await agentguard.scan({ payload, apiKey: agentguardKey, fetchImpl, logger, httpOptions });
-  logger.info?.('Running HashDit scan');
-  const hd = await hashdit.scan({ payload, apiKey: hashditKey, fetchImpl, logger, httpOptions });
 
   return {
     name: parsed.name || parsed.skill_id,
@@ -149,9 +145,6 @@ async function enrichSkill({
     agentguard_scan_id: ag.scan_id,
     agentguard_report_url: ag.report_url,
     agentguard_result: ag.result,
-    hashdit_scan_id: hd.scan_id,
-    hashdit_report_url: hd.report_url,
-    hashdit_result: hd.result,
     evaluated_at: now(),
   };
 }
@@ -174,7 +167,6 @@ async function run(argv, { logger, enrichedDir, env }) {
         parsed,
         githubToken: env.GITHUB_TOKEN,
         agentguardKey: env.AGENTGUARD_API_KEY,
-        hashditKey: env.HASHDIT_API_KEY,
         logger,
       });
       const skillId = parsed.skill_id || path.basename(fileName, '.json');
