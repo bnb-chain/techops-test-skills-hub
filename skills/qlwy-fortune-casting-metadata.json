@@ -1,6 +1,45 @@
 {
   "name": "QLWY Fortune Casting",
   "github_url": "https://github.com/qlwy-xyz/fortune-skill",
-  "category": ["divination", "nft", "vrf", "ai", "i-ching"],
-  "description": "On-chain I Ching divination (链上算卦) powered by Binance Oracle VRF. Cast hexagrams, mint NFT fortunes, and get AI-powered readings via BAP-578 agent protocol."
+  "category": [
+    "divination",
+    "nft",
+    "vrf",
+    "ai",
+    "i-ching"
+  ],
+  "description": "On-chain I Ching divination (链上算卦) powered by Binance Oracle VRF. Cast hexagrams, mint NFT fortunes, and get AI-powered readings via BAP-578 agent protocol.",
+  "owner": {
+    "username": "qlwy-xyz",
+    "display_name": "qlwy-xyz",
+    "type": "User",
+    "profile_url": "https://github.com/qlwy-xyz",
+    "avatar_url": "https://avatars.githubusercontent.com/u/239737499?v=4"
+  },
+  "repo": {
+    "stars": 1,
+    "default_branch": "main"
+  },
+  "latest_commit": "8217ddfd5521f69b151442e2d9ede8eac41e48a2",
+  "agentguard_scan_id": "38c542f5-2474-4a9d-9545-eaa47c9720fa",
+  "agentguard_report_url": "https://agentguard.gopluslabs.io/report/38c542f5-2474-4a9d-9545-eaa47c9720fa",
+  "agentguard_result": {
+    "risk_score": 30,
+    "risk_level": "low",
+    "verdict": "passed",
+    "summary": "Detected 1 critical/high threat: console-log-secret.",
+    "threats": [
+      {
+        "detector": "credential_leak",
+        "severity": "high",
+        "title": "console-log-secret",
+        "description": "Logging secrets to console",
+        "evidence": "console.log(\"\\nSkipping AI interpretation (no AUTH_TOKEN",
+        "line": 599,
+        "remediation": "This skill appears to exfiltrate credentials. Do not install or run this skill. Report it to the registry maintainer.",
+        "cwe": "CWE-200"
+      }
+    ]
+  },
+  "evaluated_at": "2026-05-29T02:10:20.220Z"
 }
