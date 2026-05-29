@@ -1,24 +1,24 @@
-name: Enrich Skill Metadata
+name: Enrich Skill Metadata (post-merge)
+
+# Post-merge persistence only. PR-time validation, scanning and the merge-gate
+# live in pr-validate.yml + pr-enrich-scan.yml. After a skill change lands on
+# main, this workflow re-enriches it and writes the enriched metadata back via
+# the GitHub Contents API (verified commit). Running on `push` to main means it
+# is never in a fork context, so secrets are available normally.
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - "skills/**-metadata.json"
   push:
     branches: [main]
     paths:
       - "skills/**-metadata.json"
 
-# Default to no permissions; each job opts in to the least it needs (C1, C3).
+# Default to no permissions; each job opts in to the least it needs.
 permissions: {}
 
 jobs:
   # ---------------------------------------------------------------------------
-  # Job A — parse-pr (LOW privilege). Runs the PR-checked-out code, but with NO
-  # secrets and read-only token, so PR-supplied code can never exfiltrate a
-  # secret (C1). Validates each submission against the strict v1 schema and
-  # emits a DATA-ONLY artifact for the privileged job to consume.
+  # Job A — parse-pr. Detects the skill files that changed in the merge commit
+  # and emits a data-only artifact for the privileged job to consume.
   # ---------------------------------------------------------------------------
   parse-pr:
     name: Parse & validate submission (Job A)
@@ -28,10 +28,10 @@ jobs:
     outputs:
       any: ${{ steps.detect.outputs.any }}
     steps:
-      - name: Checkout PR HEAD
+      - name: Checkout main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Setup Node.js
@@ -42,30 +42,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Branch/SHA values are passed via env and quoted in shell to avoid
-      # template injection (C2, M3). The file list goes to a temp file, never
-      # interpolated into another command.
       - name: Detect changed skill files
         id: detect
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            FILES=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" | grep -E '^skills/[^/]+-metadata\.json$' || true)
-          else
-            FILES=$(git diff --name-only HEAD~1 HEAD | grep -E '^skills/[^/]+-metadata\.json$' || true)
-          fi
-          # Never enrich the template itself.
-          FILES=$(printf '%s\n' "$FILES" | grep -v '^skills/_TEMPLATE-metadata\.json$' || true)
+          git diff --name-only HEAD~1 HEAD \
+            | grep -E '^skills/[^/]+-metadata\.json$' \
+            | grep -v '^skills/_TEMPLATE-metadata\.json$' > changed-skills.txt || true
 
-          if [ -z "$FILES" ]; then
+          if [ ! -s changed-skills.txt ]; then
             echo "No skill submission files changed."
             echo "any=false" >> "$GITHUB_OUTPUT"
           else
-            echo "Changed files:"; printf '%s\n' "$FILES"
-            printf '%s\n' "$FILES" > changed-skills.txt
+            echo "Changed files:"; cat changed-skills.txt
             echo "any=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -85,10 +73,8 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Job B — enrich (PRIVILEGED). Runs ONLY the main-branch code (checked out at
-  # base.sha), never the PR's copy of the scripts, then enriches the data-only
-  # artifact and runs the AgentGuard scan. The merge-gate check is published
-  # here: check-merge-gate.js exits non-zero unless every skill passed.
+  # Job B — enrich. Enriches the data-only artifact and re-runs the AgentGuard
+  # scan as defense-in-depth before persisting.
   # ---------------------------------------------------------------------------
   enrich:
     name: Enrich & scan (Job B)
@@ -98,10 +84,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Checkout main (NOT the PR) at the base commit
+      - name: Checkout main
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
+          ref: ${{ github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
@@ -125,8 +111,6 @@ jobs:
         run: |
           node scripts/enrich-skill.js parsed/*.json
 
-      # Security boundary (C3): branch protection requires this `enrich` check.
-      # It is green only when AgentGuard returned `passed` for every skill.
       - name: Merge gate (AgentGuard must pass)
         run: |
           node scripts/check-merge-gate.js enriched/*.json
@@ -139,49 +123,24 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Job C — commit-back & comment (PRIVILEGED WRITE). Runs ONLY trusted base/main
-  # code, never the PR's. Enriched metadata is persisted ONLY post-merge (push to
-  # main): during a PR we never write to the contributor's branch -- the PR head
-  # stays the author's own commit so the required `enrich` check resolves on it,
-  # and the PR head is never a fork branch we cannot push to. Reviewers see the
-  # enrichment via a single consolidated PR comment rendered by the sanitized
-  # renderer (M2).
+  # Job C — commit-back. Writes the enriched metadata to main through the GitHub
+  # Contents API (commits are GitHub-signed/verified, satisfying the signed-
+  # commit ruleset). Idempotent: skips when content is unchanged.
   # ---------------------------------------------------------------------------
   commit-back:
-    name: Commit back & comment (Job C)
+    name: Commit back (Job C)
     needs: enrich
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
     steps:
-      # Check out trusted code, never the PR's copy. On a PR this job holds write
-      # scopes, so running PR-supplied scripts here would reintroduce C1; we use
-      # base.sha (main) instead. On push we are already on the merged main commit.
-      - name: Checkout trusted base code (never the PR)
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
-        with:
-          node-version: "20"
-
       - name: Download enriched artifact
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: enriched-skills
           path: enriched/
 
-      # Persist enriched metadata ONLY after merge (push to main), committing
-      # through the GitHub Contents API rather than a runner-side `git commit`.
-      # API commits made with the workflow GITHUB_TOKEN are signed by GitHub and
-      # show as "Verified", satisfying the "require signed commits" ruleset.
-      # Deferring the write to post-merge keeps the PR head as the author's own
-      # commit (so required checks resolve) and avoids pushing to fork branches.
       - name: Commit enriched files to main (verified, via API)
-        if: github.event_name == 'push'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
           TARGET_BRANCH: ${{ github.ref_name }}
@@ -223,22 +182,3 @@ jobs:
               });
               core.info(`Committed verified enriched metadata for ${repoPath} on ${branch}.`);
             }
-
-      - name: Render PR comment body
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
-        run: |
-          node scripts/render-comment.js enriched/*.json > comment-body.md
-
-      - name: Post enrichment comment
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
-        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
-        with:
-          script: |
-            const fs = require('fs');
-            const body = fs.readFileSync('comment-body.md', 'utf8');
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: context.issue.number,
-              body,
-            });

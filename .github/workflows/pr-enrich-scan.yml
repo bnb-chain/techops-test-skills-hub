@@ -1,0 +1,146 @@
+name: PR Enrich & Scan
+
+# Privileged stage. Triggered by the completion of "PR Validate Submission" via
+# workflow_run, so it runs in the BASE repo context: it has secrets and a write
+# token EVEN for fork PRs, because it is not running in the fork's context.
+#
+# Safety: it checks out ONLY main (trusted code), runs `npm ci` from main, and
+# treats the contributor's submission strictly as data downloaded from the
+# untrusted stage's artifact. PR-supplied code is never executed here (C1). It
+# re-parses/re-validates the raw submission with main's parser, runs AgentGuard,
+# and publishes a `merge-gate` check run onto the PR head SHA (the boundary that
+# branch protection requires). A non-passing scan -> merge-gate `failure`.
+
+on:
+  workflow_run:
+    workflows: ["PR Validate Submission"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  enrich-scan:
+    name: Enrich, scan & publish merge-gate
+    # Only act on successful PR validation runs.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read       # read main code / call GitHub API
+      actions: read        # download the artifact from the triggering run
+      checks: write        # publish the merge-gate check run
+      pull-requests: write # post the enrichment comment (works for forks here)
+    steps:
+      - name: Checkout main (trusted code, never the PR)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        # No `ref:` -> defaults to the default branch (main). The PR's code is
+        # never checked out in this privileged job.
+
+      - name: Setup Node.js
+        uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
+        with:
+          node-version: "20"
+
+      - name: Install dependencies (from main)
+        run: npm ci
+
+      - name: Download submission artifact from the triggering run
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: pr-submission
+          path: submission/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Read PR context
+        id: ctx
+        run: |
+          node -e '
+            const c = require("./submission/pr-context.json");
+            const out = process.env.GITHUB_OUTPUT;
+            require("fs").appendFileSync(out,
+              `pr_number=${Number(c.pr_number)}\n` +
+              `head_sha=${String(c.head_sha)}\n` +
+              `has_skills=${c.has_skills === true}\n`);
+          '
+
+      # Re-parse the RAW submission with trusted main code, then enrich + scan.
+      # Each stage failure maps to a merge-gate `failure` with a clear summary.
+      - name: Parse, enrich & scan
+        id: scan
+        if: steps.ctx.outputs.has_skills == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGENTGUARD_API_KEY: ${{ secrets.AGENTGUARD_API_KEY }}
+          PARSED_DIR: parsed
+          ENRICHED_DIR: enriched
+        run: |
+          set +e
+          node scripts/parse-submission.js submission/*-metadata.json; rc=$?
+          if [ $rc -ne 0 ]; then
+            { echo "conclusion=failure"; echo "summary=Schema validation failed for the submission."; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node scripts/enrich-skill.js parsed/*.json; rc=$?
+          if [ $rc -ne 0 ]; then
+            { echo "conclusion=failure"; echo "summary=Enrichment failed (GitHub/scanner error)."; } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          node scripts/check-merge-gate.js enriched/*.json; rc=$?
+          if [ $rc -ne 0 ]; then
+            { echo "conclusion=failure"; echo "summary=AgentGuard gate blocked the submission."; } >> "$GITHUB_OUTPUT"
+          else
+            { echo "conclusion=success"; echo "summary=AgentGuard passed for all submitted skills."; } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish merge-gate check run on the PR head
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
+          HAS_SKILLS: ${{ steps.ctx.outputs.has_skills }}
+          SCAN_CONCLUSION: ${{ steps.scan.outputs.conclusion }}
+          SCAN_SUMMARY: ${{ steps.scan.outputs.summary }}
+        with:
+          script: |
+            const headSha = process.env.HEAD_SHA;
+            const hasSkills = process.env.HAS_SKILLS === 'true';
+            // Fail closed: if a skill changed but no conclusion was produced, block.
+            const conclusion = hasSkills
+              ? (process.env.SCAN_CONCLUSION || 'failure')
+              : 'success';
+            const summary = hasSkills
+              ? (process.env.SCAN_SUMMARY || 'No scan result was produced; failing closed.')
+              : 'No skill submission to scan.';
+            const { owner, repo } = context.repo;
+            await github.rest.checks.create({
+              owner,
+              repo,
+              name: 'merge-gate',
+              head_sha: headSha,
+              status: 'completed',
+              conclusion,
+              output: { title: 'AgentGuard merge gate', summary },
+            });
+            core.info(`merge-gate => ${conclusion} on ${headSha}`);
+
+      - name: Render PR comment body
+        if: steps.ctx.outputs.has_skills == 'true' && steps.scan.outputs.conclusion == 'success'
+        run: |
+          node scripts/render-comment.js enriched/*.json > comment-body.md
+
+      - name: Post enrichment comment
+        if: steps.ctx.outputs.has_skills == 'true' && steps.scan.outputs.conclusion == 'success'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        env:
+          PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('comment-body.md', 'utf8');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body,
+            });
