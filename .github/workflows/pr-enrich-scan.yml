@@ -84,9 +84,11 @@ jobs:
           fi
           node scripts/enrich-skill.js parsed/*.json; rc=$?
           if [ $rc -ne 0 ]; then
-            { echo "conclusion=failure"; echo "summary=Enrichment failed (GitHub/scanner error)."; } >> "$GITHUB_OUTPUT"
+            { echo "conclusion=failure"; echo "enriched=false"; echo "summary=Enrichment failed (GitHub/scanner error)."; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
+          # Enriched artifacts exist now (verdict may still be non-passing).
+          echo "enriched=true" >> "$GITHUB_OUTPUT"
           node scripts/check-merge-gate.js enriched/*.json; rc=$?
           if [ $rc -ne 0 ]; then
             { echo "conclusion=failure"; echo "summary=AgentGuard gate blocked the submission."; } >> "$GITHUB_OUTPUT"
@@ -99,19 +101,44 @@ jobs:
         env:
           HEAD_SHA: ${{ steps.ctx.outputs.head_sha }}
           HAS_SKILLS: ${{ steps.ctx.outputs.has_skills }}
+          ENRICHED: ${{ steps.scan.outputs.enriched }}
           SCAN_CONCLUSION: ${{ steps.scan.outputs.conclusion }}
           SCAN_SUMMARY: ${{ steps.scan.outputs.summary }}
         with:
           script: |
+            const fs = require('fs');
+            const path = require('path');
             const headSha = process.env.HEAD_SHA;
             const hasSkills = process.env.HAS_SKILLS === 'true';
             // Fail closed: if a skill changed but no conclusion was produced, block.
             const conclusion = hasSkills
               ? (process.env.SCAN_CONCLUSION || 'failure')
               : 'success';
-            const summary = hasSkills
+            let summary = hasSkills
               ? (process.env.SCAN_SUMMARY || 'No scan result was produced; failing closed.')
               : 'No skill submission to scan.';
+
+            // When enriched artifacts exist (pass OR a non-passing verdict), append
+            // each skill's AgentGuard verdict and report link so a blocked
+            // submission still shows where to look — not just a bare red check.
+            if (process.env.ENRICHED === 'true') {
+              try {
+                const lines = [];
+                for (const f of fs.readdirSync('enriched').filter((x) => x.endsWith('.json'))) {
+                  const m = JSON.parse(fs.readFileSync(path.join('enriched', f), 'utf8'));
+                  const verdict = m.agentguard_result && typeof m.agentguard_result.verdict === 'string'
+                    ? m.agentguard_result.verdict
+                    : 'unknown';
+                  const url = m.agentguard_report_url || null;
+                  const name = m.name || path.basename(f, '.json');
+                  lines.push(`- ${name} — AgentGuard: \`${verdict}\`${url ? ` ([report](${url}))` : ''}`);
+                }
+                if (lines.length) summary += '\n\n' + lines.join('\n');
+              } catch (err) {
+                core.warning(`Could not append verdict details: ${err.message}`);
+              }
+            }
+
             const { owner, repo } = context.repo;
             await github.rest.checks.create({
               owner,
@@ -124,13 +151,16 @@ jobs:
             });
             core.info(`merge-gate => ${conclusion} on ${headSha}`);
 
+      # Post the comment whenever enriched data exists, including a blocked
+      # (non-passing) verdict, so contributors always get the verdict + report
+      # link. render-comment.js renders a failed verdict plainly.
       - name: Render PR comment body
-        if: steps.ctx.outputs.has_skills == 'true' && steps.scan.outputs.conclusion == 'success'
+        if: steps.ctx.outputs.has_skills == 'true' && steps.scan.outputs.enriched == 'true'
         run: |
           node scripts/render-comment.js enriched/*.json > comment-body.md
 
       - name: Post enrichment comment
-        if: steps.ctx.outputs.has_skills == 'true' && steps.scan.outputs.conclusion == 'success'
+        if: steps.ctx.outputs.has_skills == 'true' && steps.scan.outputs.enriched == 'true'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
           PR_NUMBER: ${{ steps.ctx.outputs.pr_number }}
