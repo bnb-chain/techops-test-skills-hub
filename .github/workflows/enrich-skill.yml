@@ -139,10 +139,13 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
-  # Job C — commit-back (PRIVILEGED WRITE). Runs main-branch code, downloads the
-  # enriched artifact, writes it into the skill files and pushes. The branch
-  # name is passed via env and quoted in shell (C2). Posts one consolidated PR
-  # comment rendered by the sanitized renderer (M2).
+  # Job C — commit-back & comment (PRIVILEGED WRITE). Runs ONLY trusted base/main
+  # code, never the PR's. Enriched metadata is persisted ONLY post-merge (push to
+  # main): during a PR we never write to the contributor's branch -- the PR head
+  # stays the author's own commit so the required `enrich` check resolves on it,
+  # and the PR head is never a fork branch we cannot push to. Reviewers see the
+  # enrichment via a single consolidated PR comment rendered by the sanitized
+  # renderer (M2).
   # ---------------------------------------------------------------------------
   commit-back:
     name: Commit back & comment (Job C)
@@ -152,12 +155,13 @@ jobs:
       contents: write
       pull-requests: write
     steps:
-      - name: Checkout target branch
+      # Check out trusted code, never the PR's copy. On a PR this job holds write
+      # scopes, so running PR-supplied scripts here would reintroduce C1; we use
+      # base.sha (main) instead. On push we are already on the merged main commit.
+      - name: Checkout trusted base code (never the PR)
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          # Same-repo PR: push to the PR branch. Push event: stay on main.
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
-          fetch-depth: 0
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@39370e3970a6d050c480ffad4ff0ed4d3fdee5af # v4.1.0
@@ -170,17 +174,17 @@ jobs:
           name: enriched-skills
           path: enriched/
 
-      # Commit enriched metadata through the GitHub Contents API rather than a
-      # runner-side `git commit`/`git push`. Commits created via the API with the
-      # workflow GITHUB_TOKEN are signed by GitHub and show as "Verified", so they
-      # satisfy the "require signed commits" ruleset. A runner-side `git commit`
-      # is unsigned and would be rejected by that ruleset (blocking the merge).
-      - name: Commit enriched files (verified, via API)
-        if: github.event_name == 'push' || github.event.pull_request.head.repo.fork == false
+      # Persist enriched metadata ONLY after merge (push to main), committing
+      # through the GitHub Contents API rather than a runner-side `git commit`.
+      # API commits made with the workflow GITHUB_TOKEN are signed by GitHub and
+      # show as "Verified", satisfying the "require signed commits" ruleset.
+      # Deferring the write to post-merge keeps the PR head as the author's own
+      # commit (so required checks resolve) and avoids pushing to fork branches.
+      - name: Commit enriched files to main (verified, via API)
+        if: github.event_name == 'push'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
-          # PR: push to the PR's head branch. Push event: stay on the pushed branch.
-          TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
+          TARGET_BRANCH: ${{ github.ref_name }}
         with:
           script: |
             const fs = require('fs');
