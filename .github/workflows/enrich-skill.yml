@@ -170,34 +170,55 @@ jobs:
           name: enriched-skills
           path: enriched/
 
-      - name: Write enriched metadata into skill files
-        run: |
-          for f in enriched/*.json; do
-            id=$(basename "$f" .json)
-            cp "$f" "skills/${id}-metadata.json"
-          done
-
-      - name: Commit & push enriched files
-        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
+      # Commit enriched metadata through the GitHub Contents API rather than a
+      # runner-side `git commit`/`git push`. Commits created via the API with the
+      # workflow GITHUB_TOKEN are signed by GitHub and show as "Verified", so they
+      # satisfy the "require signed commits" ruleset. A runner-side `git commit`
+      # is unsigned and would be rejected by that ruleset (blocking the merge).
+      - name: Commit enriched files (verified, via API)
+        if: github.event_name == 'push' || github.event.pull_request.head.repo.fork == false
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         env:
-          BRANCH: ${{ github.event.pull_request.head.ref }}
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add skills/
-          git diff --staged --quiet && echo "No changes to commit" && exit 0
-          git commit -m "chore: enrich skill metadata"
-          git push origin "HEAD:$BRANCH"
+          # PR: push to the PR's head branch. Push event: stay on the pushed branch.
+          TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const branch = process.env.TARGET_BRANCH;
+            const { owner, repo } = context.repo;
 
-      - name: Commit enriched files to main (post-merge / push)
-        if: github.event_name == 'push'
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add skills/
-          git diff --staged --quiet && echo "No changes to commit" && exit 0
-          git commit -m "chore: enrich skill metadata"
-          git push origin HEAD:main
+            const enrichedFiles = fs.readdirSync('enriched').filter((f) => f.endsWith('.json'));
+            for (const file of enrichedFiles) {
+              const id = path.basename(file, '.json');
+              const repoPath = `skills/${id}-metadata.json`;
+              const contentB64 = fs.readFileSync(path.join('enriched', file)).toString('base64');
+
+              // Look up the existing file to get its blob SHA (required for updates)
+              // and to short-circuit when the enriched content is unchanged.
+              let sha;
+              try {
+                const { data } = await github.rest.repos.getContent({ owner, repo, path: repoPath, ref: branch });
+                sha = data.sha;
+                if (data.content && data.content.replace(/\n/g, '') === contentB64) {
+                  core.info(`No change for ${repoPath} on ${branch}; skipping.`);
+                  continue;
+                }
+              } catch (err) {
+                if (err.status !== 404) throw err;
+              }
+
+              await github.rest.repos.createOrUpdateFileContents({
+                owner,
+                repo,
+                path: repoPath,
+                branch,
+                message: `chore: enrich skill metadata (${id})`,
+                content: contentB64,
+                sha,
+              });
+              core.info(`Committed verified enriched metadata for ${repoPath} on ${branch}.`);
+            }
 
       - name: Render PR comment body
         if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork == false
